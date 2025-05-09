@@ -125,7 +125,7 @@ collect_metrics(model_params)
 
 show_best(model_params, metric = "mae")
 
-## The best mean absolute error and since the lowest mean is for trees 1579 this is the best for this metric.
+## The best mean absolute error and since the lowest mean is for trees 1579 this is the best for this metric. 
 
 hp_best <- select_best(model_params, metric = "mae")
 
