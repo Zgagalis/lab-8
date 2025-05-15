@@ -1,0 +1,179 @@
+---
+project:
+  title: "Lab 8"
+  output-dir: docs
+  type: website
+format: 
+  html:
+    self-contained: true
+---
+
+## 
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(purrr)
+library(glue)
+library(powerjoin)
+library(visdat)
+library(dplyr)
+library(skimr)
+library(ggpubr)
+library(ggplot2)
+```
+
+```{r}
+root  <- 'https://gdex.ucar.edu/dataset/camels/file'
+
+download.file('https://gdex.ucar.edu/dataset/camels/file/camels_attributes_v2.0.pdf', 
+              'data/camels_attributes_v2.0.pdf')
+types <- c("clim", "geol", "soil", "topo", "vege", "hydro")
+
+remote_files <- glue('{root}/camels_{types}.txt')
+data <- glue('data/camels_{types}.txt')
+walk2(remote_files, data, download.file, quiet = TRUE)
+camels <- map(data, read_delim, show_col_types = FALSE) 
+camels <- power_full_join(camels ,by = 'gauge_id')
+skimr:: skim(camels)
+```
+
+```{r}
+vis_dat(camels)
+
+ggplot(camels, aes(x = aridity, y = q_mean)) +
+  geom_point()
+```
+
+```{r}
+set.seed(123)
+camels_select <- camels |>
+  mutate(logQmean = log(q_mean +1)) |>
+  select(logQmean, aridity, p_mean, pet_mean, p_seasonality, gauge_lat, gauge_lon) |>
+  drop_na()
+
+camels_split <- initial_split(camels_select, prop = .80)
+camels_training <- training(camels_split)
+camels_test <- testing(camels_split)
+rec8 <- recipe(logQmean ~ ., data = camels_training) |>
+ 
+  step_normalize(all_predictors()) |>
+  step_interact(terms = ~ aridity:p_mean) |>
+  step_rm(gauge_lat, gauge_lon)
+```
+
+```{r}
+camels_fold <- vfold_cv(camels_training, v = 10)
+rand_model <- rand_forest() |>
+  set_engine("ranger") |>
+  set_mode("regression")
+
+linear_model <- linear_reg() |>
+  set_engine("lm") |>
+  set_mode("regression")
+
+decision_model <- decision_tree() |>
+  set_engine("rpart") |>
+  set_mode("regression")
+```
+
+```{r}
+library(ranger)
+wf8 <- workflow_set(list(rec8), list(rand_model, linear_model, decision_model)) |>
+  workflow_map('fit_resamples', resamples = camels_fold)
+
+autoplot(wf8)
+```
+
+```{r}
+## model selection
+## I would choose the random forest model because it has the highest rsq value and the lowest rmse value, showing that random forest represents the best correlation.
+## The random forest model is a classification model with an engine of ranger and a mode of regression. I think this model worked well because it can handle both numerical and categorical data. It also works well with missing data.
+
+
+
+```
+
+```{r}
+library(tune)
+rand_model_tune <- rand_forest(trees = tune(), min_n = tune()) |>
+  set_engine("ranger") |>
+  set_mode("regression")
+wf_tune <- workflow(rec8, rand_model_tune)
+camels_metrics = metric_set(rsq, rmse, mae)
+dials <- extract_parameter_set_dials(wf_tune)
+dials$object
+```
+
+```{r}
+new.grid <- dials %>%
+  grid_space_filling(size = 20)
+model_params <-  tune_grid(
+    wf_tune,
+    resamples = camels_fold,
+    grid = new.grid,
+    metrics = metric_set(rmse, rsq, mae),
+    control = control_grid(save_pred = TRUE)
+  )
+
+autoplot(model_params)
+
+
+collect_metrics(model_params)
+
+## There is a noticeable difference between the 3 metrics. The rsq is high while the rmse and mae is quite low indicating that the graphs are good representations
+
+show_best(model_params, metric = "mae")
+
+## The best mean absolute error and since the lowest mean is for trees 1579 this is the best for this metric. 
+
+hp_best <- select_best(model_params, metric = "mae")
+
+```
+
+```{r}
+# finalize
+
+final_wf <- finalize_workflow(wf_tune, hp_best) 
+
+lf <- last_fit(final_wf, camels_split, metrics = camels_metrics)
+
+collect_metrics(lf)
+```
+
+```{r}
+collect_predictions(lf) |>
+  ggplot(aes(x = .pred, y = logQmean)) +
+  geom_point(aes(color = logQmean)) +
+  geom_smooth(method = "lm") +
+  geom_abline() +
+  scale_color_gradient(low = "blue", high = "lightblue")+
+  ggthemes::theme_clean()
+
+
+
+  labs(title = "Finalized Model",
+       x = "Predicted",
+       y = "Actual") 
+```
+
+```{r}
+full_pred = fit(final_wf, data = camels_select) |>
+  augment(new_data = camels_select) |>
+  mutate(diff = .pred - logQmean)
+
+
+plot1 <- ggplot(data = full_pred, aes(x = gauge_lon, y = gauge_lat)) +
+  borders("state", colour = "gray") +
+  geom_point(aes(color = logQmean)) +
+  scale_color_gradient(low = "orange", high = "red") +
+  ggthemes::theme_map()
+
+plot2 <- ggplot(data = full_pred, aes(x = gauge_lon, y = gauge_lat)) +
+  borders("state", colour = "gray") +
+  geom_point(aes(color = diff)) +
+  scale_color_gradient(low = "lightblue", high = "darkblue") +
+  ggthemes::theme_map()
+library(patchwork)
+plot1 + plot2
+```
